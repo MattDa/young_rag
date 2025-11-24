@@ -89,9 +89,10 @@ def fetch_rows() -> List[Tuple[str, str]]:
     connection = psycopg2.connect(**DB_CONFIG)
     try:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT path, text FROM documents")
+            cursor.execute("SELECT path, text FROM files_tbl")
             return cursor.fetchall()
     finally:
+        print('Connection Failed')
         connection.close()
 
 
