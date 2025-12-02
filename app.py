@@ -92,7 +92,6 @@ def fetch_rows() -> List[Tuple[str, str]]:
             cursor.execute("SELECT path, text FROM files_tbl")
             return cursor.fetchall()
     finally:
-        print('Connection Failed')
         connection.close()
 
 
@@ -126,7 +125,7 @@ def sync_vector_store() -> bool:
     collection = vector_store._collection
 
     existing_count = collection.count()
-    existing = collection.get(limit=existing_count, include=["ids"]) if existing_count else {"ids": []}
+    existing = collection.get(limit=existing_count) if existing_count else {"ids": []}
     existing_ids = set(existing.get("ids", []))
 
     documents = build_documents(rows)
@@ -152,7 +151,7 @@ def stream_answer(question: str, docs):
     llm = ChatOpenAI(
         model=DEFAULT_MODEL,
         streaming=True,
-        temperature=1,
+        temperature=1
         # openai_api_key=os.getenv("OPENAI_API_KEY"),
     )
 
@@ -163,19 +162,20 @@ def stream_answer(question: str, docs):
 
     system_message = SystemMessage(
         content=(
-            "You are a helpful assistant. Use the provided context to answer the question. "
-            "Include citations for the top 3 retrieved chunks in the format: 'Sources: - path (chunk id)'."
+            "You are a helpful assistant. Use the provided context to answer the question."
+            # "Provide a concisely and focus on the most relevant details."
         )
     )
     human_message = HumanMessage(
         content=(
             f"Context:\n{context}\n\n"
             f"Question: {question}\n"
-            "Provide a concise answer with citations."
+            "Provide a concise answer."
         )
     )
 
     response_placeholder = st.empty()
+    citations_placeholder = st.empty()
     streamed_text = ""
     with st.spinner("Generating response..."):
         for chunk in llm.stream([system_message, human_message]):
@@ -183,15 +183,17 @@ def stream_answer(question: str, docs):
                 streamed_text += chunk.content
                 response_placeholder.markdown(streamed_text)
 
-    citation_lines = [
-        f"- {doc.metadata.get('path', 'unknown')} (chunk {doc.metadata.get('chunk_index', 'n/a')})"
-        for doc in docs
-    ]
-    if citation_lines:
-        streamed_text += "\n\nSources:\n" + "\n".join(citation_lines)
-        response_placeholder.markdown(streamed_text)
+    if docs:
+        citation_sections = []
+        for i, doc in enumerate(docs, start=1):
+            path = doc.metadata.get("path", "unknown")
+            chunk_index = doc.metadata.get("chunk_index", "n/a")
+            citation_sections.append(
+                f"**Source {i} — {path} (chunk {chunk_index})**\n\n{doc.page_content}"
+            )
+        citations_placeholder.markdown("\n\n".join(citation_sections))
 
-    return streamed_text
+    return streamed_text + ("\n\n" + "\n\n".join(citation_sections) if docs else "")
 
 
 def init_session_state():
