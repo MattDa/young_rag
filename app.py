@@ -3,7 +3,8 @@ import psycopg2
 import streamlit as st
 from langchain_community.vectorstores import Chroma
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain.schema import SystemMessage, HumanMessage
+from langchain.chains import ConversationalRetrievalChain
+from langchain.memory import ConversationBufferMemory
 import tiktoken
 from typing import List, Dict, Tuple
 
@@ -89,7 +90,7 @@ def fetch_rows() -> List[Tuple[str, str]]:
     connection = psycopg2.connect(**DB_CONFIG)
     try:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT path, text FROM files_tbl")
+            cursor.execute("SELECT path, text FROM documents")
             return cursor.fetchall()
     finally:
         connection.close()
@@ -142,47 +143,41 @@ def sync_vector_store() -> bool:
     return True
 
 
-def retrieve_context(query: str, top_k: int = 3):
-    retriever = get_vector_store().as_retriever(search_kwargs={"k": top_k})
-    return retriever.get_relevant_documents(query)
-
-
-def stream_answer(question: str, docs):
-    llm = ChatOpenAI(
-        model=DEFAULT_MODEL,
-        streaming=True,
-        temperature=1
-        # openai_api_key=os.getenv("OPENAI_API_KEY"),
-    )
-
-    context_lines = []
-    for idx, doc in enumerate(docs, start=1):
-        context_lines.append(f"[{idx}] {doc.page_content}\nSource: {doc.metadata.get('path', 'unknown')}")
-    context = "\n\n".join(context_lines) if context_lines else "No relevant context found."
-
-    system_message = SystemMessage(
-        content=(
-            "You are a helpful assistant. Use the provided context to answer the question."
-            # "Provide a concisely and focus on the most relevant details."
+def get_conversation_chain():
+    if "conversation_chain" not in st.session_state:
+        llm = ChatOpenAI(
+            model=DEFAULT_MODEL,
+            streaming=True,
+            temperature=1,
+            # openai_api_key=os.getenv("OPENAI_API_KEY"),
         )
-    )
-    human_message = HumanMessage(
-        content=(
-            f"Context:\n{context}\n\n"
-            f"Question: {question}\n"
-            "Provide a concise answer."
+        memory = ConversationBufferMemory(
+            memory_key="chat_history",
+            return_messages=True,
+            output_key="answer",
         )
-    )
+        retriever = get_vector_store().as_retriever(search_kwargs={"k": 3})
+        st.session_state.conversation_chain = ConversationalRetrievalChain.from_llm(
+            llm=llm,
+            retriever=retriever,
+            memory=memory,
+            return_source_documents=True,
+        )
+    return st.session_state.conversation_chain
+
+
+def stream_answer(question: str):
+    chain = get_conversation_chain()
 
     response_placeholder = st.empty()
     citations_placeholder = st.empty()
     streamed_text = ""
     with st.spinner("Generating response..."):
-        for chunk in llm.stream([system_message, human_message]):
-            if chunk.content:
-                streamed_text += chunk.content
-                response_placeholder.markdown(streamed_text)
+        result = chain.invoke({"question": question})
+        streamed_text = result.get("answer", "")
+        response_placeholder.markdown(streamed_text)
 
+    docs = result.get("source_documents", [])
     if docs:
         citation_sections = []
         for i, doc in enumerate(docs, start=1):
@@ -234,8 +229,7 @@ def main():
             st.markdown(question)
 
         with st.chat_message("assistant"):
-            docs = retrieve_context(question)
-            answer = stream_answer(question, docs)
+            answer = stream_answer(question)
             st.session_state.messages.append({"role": "assistant", "content": answer})
 
 
